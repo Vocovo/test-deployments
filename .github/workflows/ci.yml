@@ -1,0 +1,95 @@
+name: Merge main
+
+on:
+  pull_request:
+
+jobs:
+  deploy:
+    name: Merge
+
+    runs-on: ubuntu-latest
+
+    #env:
+    #  NPM_GITHUB_TOKEN: ${{ secrets.NPM_GITHUB_TOKEN }}
+
+    #permissions:
+    #  deployments: write
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Post Deployments API event
+        if: startsWith(github.event.pull_request.title, 'VOC-')
+        id: deployment
+        run: |
+          echo "PR: ${{ github.event.pull_request.title }}"
+          issueKey=`
+            echo "${{ github.event.pull_request.title }}" |
+              cut -d- -f1-2 
+          `
+          echo "Issue key: ${issueKey}"
+
+          if ! curl -s -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.DEPLOYMENTS_GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            'https://api.github.com/repos/${{ github.repository }}/deployments' \
+            -d '{  
+              "ref": "main",
+              "payload": "{ \"deploy\": \"sync\" }",
+              "description": "Merged PR ${{ github.event.pull_request.number }}"
+            }' > /tmp/curl-create-deployment.out
+          then
+            echo "Error: curl failed with exit code ${?}"
+          else
+            deploymentId=`
+              cat /tmp/curl-create-deployment.out | 
+                jq '.id'
+            `
+            if [ -z "${deploymentId}" ]
+            then
+              echo "Error: failed to to create deployment"
+            else
+              echo "Deployment created for PR: ${{ github.event.pull_request.title }}"
+              echo "Deployment ID: ${deploymentId}"
+              curl -s -L \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.DEPLOYMENTS_GITHUB_TOKEN }}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${{ github.repository }}/deployments/${deploymentId}" |
+                jq '.id,.url,.description,.environment,.created_at'
+            
+              sleep 5
+              if ! curl -s -L \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${{ secrets.DEPLOYMENTS_GITHUB_TOKEN }}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                https://api.github.com/repos/${{ github.repository }}/deployments/${deploymentId}/statuses \
+                -d '{
+                  "environment": "production",
+                  "state": "success",
+                  "log_url": "https://app.datadog.eu/dashboard/lists",
+                  "description": "PR merged"
+                }' | tee /tmp/curl-create-deployment-status.out
+              then
+                echo "Error: failed to create deployment status"
+              else
+                deploymentState=`
+                  cat /tmp/curl-create-deployment-status.out |
+                    jq '.state'
+                `
+                if [ -z "${deploymentState}" ]
+                then
+                  cat /tmp/curl-create-deployment-status.out
+                  echo "Error: failed to create deployment status"                  
+                elif [ "${deploymentState}" != 'success' ]
+                then
+                  cat /tmp/curl-create-deployment-status.out
+                  echo "Error: failed to create deployment status"                  
+                else
+                  echo "OK: Created deployment status: ${deploymentState}"
+                fi
+              fi
+            fi
+          fi
